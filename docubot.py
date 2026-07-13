@@ -22,8 +22,11 @@ class DocuBot:
         # Load documents into memory
         self.documents = self.load_documents()  # List of (filename, text)
 
-        # Build a retrieval index (implemented in Phase 1)
-        self.index = self.build_index(self.documents)
+        # Split documents into paragraph-level chunks for finer retrieval
+        self.chunks = self.build_chunks(self.documents)  # List of (filename, paragraph)
+
+        # Build a retrieval index over the paragraph chunks (implemented in Phase 1)
+        self.index = self.build_index(self.chunks)
 
     # -----------------------------------------------------------
     # Document Loading
@@ -45,6 +48,26 @@ class DocuBot:
         return docs
 
     # -----------------------------------------------------------
+    # Paragraph Chunking
+    # -----------------------------------------------------------
+
+    def build_chunks(self, documents):
+        """
+        Splits each document's text into paragraphs (separated by blank lines)
+        so retrieval can return smaller, more focused snippets.
+
+        Returns a list of tuples: (filename, paragraph_text)
+        """
+        chunks = []
+        for filename, text in documents:
+            paragraphs = text.split("\n\n")
+            for paragraph in paragraphs:
+                paragraph = paragraph.strip()
+                if paragraph:
+                    chunks.append((filename, paragraph))
+        return chunks
+
+    # -----------------------------------------------------------
     # Index Construction (Phase 1)
     # -----------------------------------------------------------
 
@@ -64,7 +87,13 @@ class DocuBot:
         ignore punctuation if needed.
         """
         index = {}
-        # TODO: implement simple indexing
+        for filename, text in documents:
+            tokens = text.lower().split()
+            for token in tokens:
+                if token not in index:
+                    index[token] = []
+                if filename not in index[token]:
+                    index[token].append(filename)
         return index
 
     # -----------------------------------------------------------
@@ -81,8 +110,9 @@ class DocuBot:
         - Count how many appear in the text
         - Return the count as the score
         """
-        # TODO: implement scoring
-        return 0
+        query_words = query.lower().split()
+        text_words = text.lower().split()
+        return sum(text_words.count(word) for word in query_words)
 
     def retrieve(self, query, top_k=3):
         """
@@ -91,9 +121,48 @@ class DocuBot:
 
         Return a list of (filename, text) sorted by score descending.
         """
-        results = []
-        # TODO: implement retrieval logic
+        scored = []
+        for filename, paragraph in self.chunks:
+            score = self.score_document(query, paragraph)
+            if score > 0:
+                scored.append((score, filename, paragraph))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        results = [(filename, text) for _, filename, text in scored]
         return results[:top_k]
+
+    # -----------------------------------------------------------
+    # Guardrail: refuse to answer without meaningful evidence
+    # -----------------------------------------------------------
+
+    NO_EVIDENCE_MESSAGE = "I do not know based on these docs."
+
+    def has_sufficient_evidence(self, query, snippets):
+        """
+        Decides whether the retrieved snippets represent meaningful evidence
+        for answering the query, as opposed to a coincidental word overlap.
+
+        "No useful context" means either:
+        - Nothing was retrieved at all, or
+        - The best snippet only overlaps the query by a stray word or two,
+          rather than sharing a real portion of its vocabulary.
+
+        We require the top snippet to share at least half of the query's
+        distinct words (minimum 1) to count as real evidence.
+        """
+        if not snippets:
+            return False
+
+        query_words = set(query.lower().split())
+        if not query_words:
+            return False
+
+        _, top_text = snippets[0]
+        top_words = set(top_text.lower().split())
+        matched_words = query_words & top_words
+
+        required_matches = max(1, len(query_words) // 2)
+        return len(matched_words) >= required_matches
 
     # -----------------------------------------------------------
     # Answering Modes
@@ -106,8 +175,8 @@ class DocuBot:
         """
         snippets = self.retrieve(query, top_k=top_k)
 
-        if not snippets:
-            return "I do not know based on these docs."
+        if not self.has_sufficient_evidence(query, snippets):
+            return self.NO_EVIDENCE_MESSAGE
 
         formatted = []
         for filename, text in snippets:
@@ -128,8 +197,8 @@ class DocuBot:
 
         snippets = self.retrieve(query, top_k=top_k)
 
-        if not snippets:
-            return "I do not know based on these docs."
+        if not self.has_sufficient_evidence(query, snippets):
+            return self.NO_EVIDENCE_MESSAGE
 
         return self.llm_client.answer_from_snippets(query, snippets)
 
